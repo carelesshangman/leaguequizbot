@@ -305,6 +305,7 @@ const deleteUnansweredMessages = async (userId) => {
 const triviaQuestionsSonic = require('./sonic_quiz.js');
 
 const getTriviaEmbed = (questionData) => {
+    console.log(questionData);
     if (!questionData.spoiler) {
         return new EmbedBuilder()
             .setTitle("League of Legends Trivia!")
