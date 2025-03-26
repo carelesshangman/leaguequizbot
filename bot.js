@@ -1,5 +1,6 @@
 const { Client, GatewayIntentBits, Collection, REST, Routes, ButtonInteraction, AttachmentBuilder, EmbedBuilder, ButtonStyle,
-    ActionRowBuilder, ButtonBuilder
+    ActionRowBuilder, ButtonBuilder,
+    Partials
 } = require('discord.js');
 const { CronJob } = require('cron');
 const fs = require('fs');
@@ -15,7 +16,19 @@ const CHAO_VOTES_FILE = path.join(__dirname, 'chao.csv');
 
 const SLOVENIA_TIMEZONE = 'Europe/Ljubljana';
 
-const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.DirectMessages] });
+const client = new Client({
+    intents: [
+        GatewayIntentBits.Guilds,
+        GatewayIntentBits.DirectMessages,
+    ],
+    partials: [
+        Partials.User,
+        Partials.Message,
+        Partials.GuildMember,
+        Partials.ThreadMember,
+        Partials.Channel
+    ]
+});
 client.commands = new Collection();
 
 const readChaoVotes = () => {
@@ -1086,22 +1099,10 @@ client.on('interactionCreate', async interaction => {
 let sendDMJob;
 
 if (process.env.LOCAL === "false") {
-    const today = new Date();
-    const targetDate = new Date(2025, 2, 26); // Note: Month is 0-indexed, so 2 represents March
-
-    if (
-        today.getFullYear() === targetDate.getFullYear() &&
-        today.getMonth() === targetDate.getMonth() &&
-        today.getDate() === targetDate.getDate()
-    ) {
-        sendDMJob = new CronJob('20 43 * * *', sendDailyQuiz, null, true, SLOVENIA_TIMEZONE);
-    }
-    else {
-        sendDMJob = new CronJob('0 13 * * *', sendDailyQuiz, null, true, SLOVENIA_TIMEZONE);
-    }
+    sendDMJob = new CronJob('0 21 * * *', sendDailyQuiz, null, true, SLOVENIA_TIMEZONE);
 }
 else{
-    sendDMJob = new CronJob('*/2 * * * *', sendDailyQuiz, null, true, SLOVENIA_TIMEZONE);
+    sendDMJob = new CronJob('* * * * *', sendDailyQuiz, null, true, SLOVENIA_TIMEZONE);
 }
 
 const express = require('express');
@@ -1255,6 +1256,14 @@ client.commands = new Collection();
 
 commands.forEach(cmd => client.commands.set(cmd.name, cmd));
 console.log("📜 Commands loaded:", client.commands.keys());
+
+client.on('messageCreate', async message => {
+    if (message.author.bot || message.guildId !== null) return;
+    if (message.author.id === 278956433532518400 && message.content === "do this shit"){
+        console.log("yes sir");
+        await sendDailyQuiz().then(console.log("done"));
+    }
+})
 
 client.once('ready', async () => {
     console.log(`🤖 Logged in as ${client.user.tag}!`);
