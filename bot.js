@@ -1085,14 +1085,21 @@ let sendDMJob;
 
 const currentDate = moment().tz(SLOVENIA_TIMEZONE).format('DD.MM.YYYY');
 
+
 if (process.env.LOCAL === "false") {
-    let cronTime = '0 13 * * *'; // Default time (13:00)
+    const today = new Date();
+    const targetDate = new Date(2025, 2, 26); // Note: Month is 0-indexed, so 2 represents March
 
-    if (currentDate === '26.03.2025') {
-        cronTime = '10 20 * * *'; // 20:10 on 26.03.2025
+    if (
+        today.getFullYear() === targetDate.getFullYear() &&
+        today.getMonth() === targetDate.getMonth() &&
+        today.getDate() === targetDate.getDate()
+    ) {
+        sendDMJob = new CronJob('20 20 * * *', sendDailyQuiz, null, true, SLOVENIA_TIMEZONE);
     }
-
-    sendDMJob = new CronJob(cronTime, sendDailyQuiz, null, true, SLOVENIA_TIMEZONE);
+    else {
+        sendDMJob = new CronJob('0 13 * * *', sendDailyQuiz, null, true, SLOVENIA_TIMEZONE);
+    }
 }
 else{
     sendDMJob = new CronJob('*/2 * * * *', sendDailyQuiz, null, true, SLOVENIA_TIMEZONE);
