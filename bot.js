@@ -4,6 +4,8 @@ const { Client, GatewayIntentBits, Collection, REST, Routes, ButtonInteraction, 
 const { CronJob } = require('cron');
 const fs = require('fs');
 const path = require('path');
+const moment = require('moment');
+
 require('dotenv').config();
 
 const REGISTERED_USERS_FILE = path.join(__dirname, 'registered_users.csv');
@@ -1081,8 +1083,16 @@ client.on('interactionCreate', async interaction => {
 
 let sendDMJob;
 
+const currentDate = moment().tz(SLOVENIA_TIMEZONE).format('DD.MM.YYYY');
+
 if (process.env.LOCAL === "false") {
-    sendDMJob = new CronJob('0 13 * * *', sendDailyQuiz, null, true, SLOVENIA_TIMEZONE);
+    let cronTime = '0 13 * * *'; // Default time (13:00)
+
+    if (currentDate === '26.03.2025') {
+        cronTime = '10 20 * * *'; // 20:10 on 26.03.2025
+    }
+
+    sendDMJob = new CronJob(cronTime, sendDailyQuiz, null, true, SLOVENIA_TIMEZONE);
 }
 else{
     sendDMJob = new CronJob('*/2 * * * *', sendDailyQuiz, null, true, SLOVENIA_TIMEZONE);
