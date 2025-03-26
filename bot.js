@@ -1083,9 +1083,6 @@ client.on('interactionCreate', async interaction => {
 
 let sendDMJob;
 
-const currentDate = moment().tz(SLOVENIA_TIMEZONE).format('DD.MM.YYYY');
-
-
 if (process.env.LOCAL === "false") {
     const today = new Date();
     const targetDate = new Date(2025, 2, 26); // Note: Month is 0-indexed, so 2 represents March
