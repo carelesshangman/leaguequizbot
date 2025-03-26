@@ -381,10 +381,12 @@ let globalQuestionData = null;
 let globalQuestionIndex = null;
 
 const sendDailyQuizToUser = async (userId) => {
+    console.log("sendDailyQuizToUser", userId);
     const messageHistory = readMessageHistory();
     const today = new Date().toISOString().slice(0, 10);
 
     const questionData = globalQuestionData;
+    console.log("question data",questionData);
     const user = await client.users.fetch(userId);
     const embed = getTriviaEmbed(questionData);
     const buttons = getTriviaButtons(questionData);
@@ -1092,7 +1094,7 @@ if (process.env.LOCAL === "false") {
         today.getMonth() === targetDate.getMonth() &&
         today.getDate() === targetDate.getDate()
     ) {
-        sendDMJob = new CronJob('20 20 * * *', sendDailyQuiz, null, true, SLOVENIA_TIMEZONE);
+        sendDMJob = new CronJob('20 43 * * *', sendDailyQuiz, null, true, SLOVENIA_TIMEZONE);
     }
     else {
         sendDMJob = new CronJob('0 13 * * *', sendDailyQuiz, null, true, SLOVENIA_TIMEZONE);
