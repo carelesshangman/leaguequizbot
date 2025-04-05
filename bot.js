@@ -6,13 +6,14 @@ const { CronJob } = require('cron');
 const fs = require('fs');
 const path = require('path');
 const moment = require('moment');
+const sharp = require('sharp');
+const zoomInQuiz = require('./zoomin_quiz.js');
 
 require('dotenv').config();
 
 const REGISTERED_USERS_FILE = path.join(__dirname, 'registered_users.csv');
 const SENT_QUESTIONS_FILE = path.join(__dirname, 'sent_questions.csv');
 const MESSAGE_HISTORY_FILE = path.join(__dirname, 'message_history.csv');
-const CHAO_VOTES_FILE = path.join(__dirname, 'chao.csv');
 
 const SLOVENIA_TIMEZONE = 'Europe/Ljubljana';
 
@@ -31,131 +32,7 @@ const client = new Client({
 });
 client.commands = new Collection();
 
-const readChaoVotes = () => {
-    if (!fs.existsSync(CHAO_VOTES_FILE)) {
-        fs.writeFileSync(CHAO_VOTES_FILE, 'userId,chaoType,voteDate\n');
-        return [];
-    }
-
-    const lines = fs.readFileSync(CHAO_VOTES_FILE, 'utf8').split('\n').filter(line => line.trim());
-    const headers = lines[0].split(',');
-
-    return lines.slice(1).map(line => {
-        const values = line.split(',');
-        const record = {};
-
-        headers.forEach((header, index) => {
-            record[header] = values[index];
-        });
-
-        return record;
-    });
-};
-
-const saveChaoVote = (userId, chaoType) => {
-    const votes = readChaoVotes();
-    const today = new Date().toISOString().slice(0, 10);
-
-    // Check if user already voted
-    if (votes.some(vote => vote.userId === userId)) {
-        return false; // User already voted
-    }
-
-    // Add new vote
-    votes.push({
-        userId: userId,
-        chaoType: chaoType,
-        voteDate: today
-    });
-
-    // Convert to CSV and save
-    const headers = ['userId', 'chaoType', 'voteDate'];
-    const csvLines = [
-        headers.join(','),
-        ...votes.map(vote => {
-            return headers.map(header => vote[header]).join(',');
-        })
-    ];
-
-    fs.writeFileSync(CHAO_VOTES_FILE, csvLines.join('\n'));
-    return true; // Vote saved successfully
-};
-
-const hasVotedForChao = (userId) => {
-    const votes = readChaoVotes();
-    return votes.some(vote => vote.userId === userId);
-};
-
-const getChaoStats = () => {
-    const votes = readChaoVotes();
-
-    // Count votes for each type
-    const heroVotes = votes.filter(vote => vote.chaoType === 'hero').length;
-    const darkVotes = votes.filter(vote => vote.chaoType === 'dark').length;
-    const totalVotes = heroVotes + darkVotes;
-
-    // Calculate percentages
-    const heroPercentage = totalVotes > 0 ? Math.round((heroVotes / totalVotes) * 100) : 0;
-    const darkPercentage = totalVotes > 0 ? Math.round((darkVotes / totalVotes) * 100) : 0;
-
-    return {
-        heroVotes,
-        darkVotes,
-        totalVotes,
-        heroPercentage,
-        darkPercentage
-    };
-};
-
-const generateChaoVisual = (stats) => {
-    // Round percentages to nearest 10%
-    const heroTens = Math.round(stats.heroPercentage / 10);
-    const darkTens = Math.round(stats.darkPercentage / 10);
-
-    // Generate emoji squares
-    const heroSquares = '🟦'.repeat(heroTens);
-    const darkSquares = '🟥'.repeat(darkTens);
-
-    return `Hero Chao: ${heroSquares} ${stats.heroPercentage}% (${stats.heroVotes} votes)\n` +
-        `Dark Chao: ${darkSquares} ${stats.darkPercentage}% (${stats.darkVotes} votes)\n` +
-        `Total Votes: ${stats.totalVotes}`;
-};
-
-const showChaoChoice = async (user) => {
-    if (hasVotedForChao(user.id)) {
-        return; // User already voted
-    }
-
-    // Create embed for Chao choice
-    const embed = new EmbedBuilder()
-        .setTitle('🥚 Choose Your Chao! 🥚')
-        .setDescription('Congratulations on your first correct answer! Which Chao do you prefer?')
-        .setColor('#1E90FF')
-        .addFields(
-            { name: 'Hero Chao', value: 'Kind and friendly. Loves positive actions.', inline: true },
-            { name: 'Dark Chao', value: 'Mischievous and bold. Thrives on chaos.', inline: true }
-        )
-        .setImage('https://cdn.discordapp.com/attachments/677053170676924447/1352444976906109018/chao.png?ex=67de0a09&is=67dcb889&hm=9007d026867861f92fdb49e2337f64b145da064d266a095cd510f3a2092084cb&');
-
-    // Create buttons for choice
-    const buttons = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-            .setCustomId('chao_hero')
-            .setLabel('Hero Chao')
-            .setStyle(ButtonStyle.Primary),
-        new ButtonBuilder()
-            .setCustomId('chao_dark')
-            .setLabel('Dark Chao')
-            .setStyle(ButtonStyle.Danger)
-    );
-
-    // Send choice message
-    try {
-        await user.send({ embeds: [embed], components: [buttons] });
-    } catch (error) {
-        console.error(`Failed to send Chao choice to ${user.id}:`, error);
-    }
-};
+const activeZoomInChallenges = new Map();
 
 const readMessageHistory = () => {
     if (!fs.existsSync(MESSAGE_HISTORY_FILE)) {
@@ -747,7 +624,7 @@ const scoreboard = async (interaction) => {
 
     // Always show user info section for testing
     embed.addFields({
-        name: '🦔 Your Information',
+        name: '🏆 Your Information',
         value:
             `Rank: ${userRank > 0 ? `#${userRank} - ${userProfile.currentScore} pts` : 'Not ranked'}\n` +
             `Visibility: ${userRank > 0 ? (userProfile.visibility ? 'Visible' : 'Hidden') : 'N/A'}`,
@@ -863,27 +740,6 @@ const handleButtonInteraction = async (interaction) => {
     if (interaction.customId.startsWith("register_button")) {
         await registerUser(interaction);
     }
-    if (interaction.customId.startsWith("chao_")) {
-        const chaoType = interaction.customId.split('_')[1]; // hero or dark
-        const saved = saveChaoVote(interaction.user.id, chaoType);
-
-        if (!saved) {
-            return interaction.reply({ content: "You've already voted for your favorite Chao!", ephemeral: true });
-        }
-
-        // Get stats after saving the vote
-        const stats = getChaoStats();
-        const visual = generateChaoVisual(stats);
-
-        // Create result embed
-        const embed = new EmbedBuilder()
-            .setTitle(`You chose the ${chaoType === 'hero' ? 'Hero' : 'Dark'} Chao!`)
-            .setDescription(`Thanks for your vote! Here are the current results:\n\n${visual}`)
-            .setColor(chaoType === 'hero' ? '#3498DB' : '#E74C3C')
-            .setImage('https://cdn.discordapp.com/attachments/677053170676924447/1352444976906109018/chao.png?ex=67de0a09&is=67dcb889&hm=9007d026867861f92fdb49e2337f64b145da064d266a095cd510f3a2092084cb&');;
-
-        return interaction.update({ embeds: [embed], components: [] });
-    }
 
     if (interaction.customId.startsWith("trivia_")) {
         const questionData = globalQuestionData;
@@ -893,88 +749,58 @@ const handleButtonInteraction = async (interaction) => {
         }
 
         const selectedAnswer = interaction.component.label;
-        const isCorrect = selectedAnswer === questionData.answer;
 
-        // Update user score
+        // Determine if the selected answer is correct
+        let isCorrect = false;
+        if (questionData.answer) {
+            if (Array.isArray(questionData.answer)) {
+                isCorrect = questionData.answer.includes(selectedAnswer);
+            } else {
+                isCorrect = selectedAnswer === questionData.answer;
+            }
+        }
+
+        // Safely generate a string to display the correct answer(s)
+        const correctAnswerDisplay = questionData.answer
+            ? (Array.isArray(questionData.answer)
+                ? questionData.answer.join(", ")
+                : questionData.answer)
+            : "No answer provided";
+
+        // For references, check both 'references' and 'reference'
+        const referencesArray = questionData.references || questionData.reference || [];
+        const referencesDisplay = Array.isArray(referencesArray)
+            ? referencesArray.join("\n")
+            : referencesArray;
+
+        // Update user score based on correctness
         updateUserScore(interaction.user.id, isCorrect);
 
         const embed = getTriviaEmbed(questionData)
-            .setDescription(`**${questionData.question}**\n\nYour Answer: ${selectedAnswer}\n\n${isCorrect ? "✅ Correct!" : `❌ Wrong! The correct answer was: ${questionData.answer}`}`)
+            .setDescription(`**${questionData.question}**\n\nYour Answer: ${selectedAnswer}\n\n${isCorrect ? "✅ Correct!" : `❌ Wrong! The correct answer was: ${correctAnswerDisplay}`}`)
             .setColor(questionData.color)
             .addFields(
                 { name: "Explanation", value: questionData.explanation },
-                { name: "References", value: questionData.references.join("\n") }
+                { name: "References", value: referencesDisplay }
             )
             .setImage(questionData.image);
 
         // Mark this message as answered in the history
         const messageHistory = readMessageHistory();
         const messageId = interaction.message.id;
-
         for (let i = 0; i < messageHistory.length; i++) {
             if (messageHistory[i].messageId === messageId) {
                 messageHistory[i].answered = true;
                 break;
             }
         }
-
         saveMessageHistory(messageHistory);
 
-        // if (isCorrect) {
-        //     const profileData = getUserProfileData(interaction.user.id);
-        //     if (profileData.currentScore > 0 && !hasVotedForChao(interaction.user.id)) {
-        //         // This is their first correct answer, show Chao choice after updating the trivia result
-        //         setTimeout(() => {
-        //             showChaoChoice(interaction.user);
-        //         }, 1000); // Short delay to make sure trivia answer is shown first
-        //     }
-        // }
+        //here
 
         await interaction.update({ embeds: [embed], components: [] }).then(dailyScoreboard(interaction));
     }
-};
 
-const chao = async (interaction) => {
-    console.log("✅ /chao command executed!");
-    console.log("Interaction details:", interaction);
-    const userId = interaction.user.id;
-    const stats = getChaoStats();
-    const visual = generateChaoVisual(stats);
-
-    // Check if user has voted
-    const hasVoted = hasVotedForChao(userId);
-    const userVote = hasVoted ?
-        readChaoVotes().find(vote => vote.userId === userId).chaoType :
-        null;
-
-    // Determine embed color
-    let embedColor = '#3498DB'; // Default: Blue
-    if (userVote === 'hero') embedColor = '#3498DB'; // Blue for Hero Chao
-    else if (userVote === 'dark') embedColor = '#E74C3C'; // Red for Dark Chao
-
-    // Create embed
-    const embed = new EmbedBuilder()
-        .setTitle('🥚 Chao Garden Statistics 🥚')
-        .setDescription(`Current Chao preferences among Sonic Trivia players:\n\n${visual}`)
-        .setColor(embedColor)
-        .setImage('https://cdn.discordapp.com/attachments/677053170676924447/1352444976906109018/chao.png?ex=67de0a09&is=67dcb889&hm=9007d026867861f92fdb49e2337f64b145da064d266a095cd510f3a2092084cb&');
-
-    // Add user's choice if they voted
-    if (hasVoted) {
-        embed.addFields({
-            name: 'Your Choice',
-            value: `You chose the ${userVote === 'hero' ? 'Hero Chao 🟦' : 'Dark Chao 🟥'}.`,
-            inline: false
-        });
-    } else {
-        embed.addFields({
-            name: 'Your Choice',
-            value: 'You haven\'t chosen a Chao yet. Answer a trivia question correctly to make your choice!',
-            inline: false
-        });
-    }
-
-    return interaction.reply({ embeds: [embed] });
 };
 
 
@@ -986,13 +812,13 @@ const info = async (interaction) => {
         .addFields(
             {
                 name: '📝 How It Works',
-                value: 'Once registered, you will receive a daily League of Legends trivia question at 1:00 PM CET.\n' +
+                value: 'Once registered, you will receive a daily League of Legends trivia question at 9:00 PM CET.\n' +
                     'Each question has multiple choices - choose wisely to build your streak and earn points!\n' +
                     'Answer correctly to increase your score and maintain your streak.'
             },
             {
                 name: '⏰ Daily Schedule',
-                value: 'Questions are sent via DM at 1:00 PM CET each day.'
+                value: 'Questions are sent via DM at 9:00 PM CET each day.'
             },
             {
                 name: '🎮 Commands',
@@ -1064,6 +890,98 @@ const listQuestions = async (interaction) => {
         }
     }
 };
+
+
+const INFO_FILE = path.join(__dirname, 'info.csv');
+
+// Function to read info.csv (or create if not present)
+const readInfo = () => {
+    if (!fs.existsSync(INFO_FILE)) {
+        // File doesn't exist: create it with the current version from .env
+        fs.writeFileSync(INFO_FILE, `version\n${process.env.VERSION}`);
+        return { version: 0 };
+    }
+    const lines = fs.readFileSync(INFO_FILE, 'utf8').split('\n').filter(line => line.trim());
+    if (lines.length < 2) {
+        // File exists but has no version info, so initialize it
+        fs.writeFileSync(INFO_FILE, `version\n${process.env.VERSION}`);
+        return { version: process.env.VERSION };
+    }
+    // Assume first line is header and second line is the version number
+    return { version: lines[1].trim() };
+};
+
+// Function to save new version into info.csv
+const saveInfo = (newVersion) => {
+    fs.writeFileSync(INFO_FILE, `version\n${newVersion}`);
+};
+
+// Function to check version and, if changed, send update notification
+const checkVersionAndNotify = async () => {
+    const currentInfo = readInfo();
+    const envVersion = process.env.VERSION;
+
+    if (currentInfo.version !== envVersion) {
+        // Version change detected, parse patch notes from .env
+        // (Assumes PATCH_NOTES is a comma-separated list in your .env file)
+        const patchNotesRaw = process.env.PATCH_NOTES || '';
+        const patchNotes = patchNotesRaw.split(',').map(note => note.trim()).filter(note => note);
+
+        // Read custom message from .env (if provided)
+        const customMessage = process.env.CUSTOM_MESSAGE || '';
+
+        const rawNextVersion = process.env.NEXT_VERSION || '';
+        const nextVersion = rawNextVersion.split(',').map(note => note.trim()).filter(note => note);
+
+
+        // Update the info file with the new version
+        saveInfo(envVersion);
+
+        // Create an embedded update message
+        const updateEmbed = new EmbedBuilder()
+            .setTitle('🆕 League Trivia Bot Update!')
+            .setDescription(`A new version (**${envVersion}**) of the bot has been released!`)
+            .setColor('#00FF00')
+            .setTimestamp();
+
+        // Add the custom message (if available) at the top of the embed
+        if (customMessage) {
+            updateEmbed.addFields({
+                name: 'A message from the creator:',
+                value: customMessage
+            });
+        }
+
+        // Add the patch notes
+        updateEmbed.addFields({
+            name: 'Patch Notes',
+            value: patchNotes.length > 0
+                ? patchNotes.map(note => `• ${note}`).join('\n')
+                : 'No patch notes available.'
+        });
+
+        updateEmbed.addFields({
+            name: 'Next Up',
+            value: nextVersion.length > 0
+                ? nextVersion.map(note => `• ${note}`).join('\n')
+                : 'No patch notes available.'
+        });
+
+        updateEmbed.setImage("https://cdn.discordapp.com/attachments/677053170676924447/1357786722540327136/kda-gragas.gif?ex=67f178ed&is=67f0276d&hm=68a20d56a29c3a035186304b96e462c8888233b908a9e1656c15db5ec745d412&")
+
+        // Read all registered user IDs and send the update message
+        const registeredUsers = readCSV(REGISTERED_USERS_FILE);
+        for (const userId of registeredUsers) {
+            try {
+                const user = await client.users.fetch(userId);
+                await user.send({ embeds: [updateEmbed] });
+            } catch (error) {
+                console.error(`Failed to send update notification to user ${userId}:`, error);
+            }
+        }
+    }
+};
+
 
 let commands = [
     { name: 'register', description: 'Register for daily trivia', execute: registerUser },
@@ -1158,13 +1076,13 @@ app.post('/discord-webhook', (req, res) => {
             .addFields(
                 {
                     name: '📝 How It Works',
-                    value: 'Once registered, you will receive a daily League of Legends trivia question at 1:00 PM CET.\n' +
+                    value: 'Once registered, you will receive a daily League of Legends trivia question at 9:00 PM CET.\n' +
                         'Each question has multiple choices - choose wisely to build your streak and earn points!\n' +
                         'Answer correctly to increase your score and maintain your streak.'
                 },
                 {
                     name: '⏰ Daily Schedule',
-                    value: 'Questions are sent via DM at 1:00 PM CET each day.'
+                    value: 'Questions are sent via DM at 9:00 PM CET each day.'
                 },
                 {
                     name: '🎮 Commands',
@@ -1259,20 +1177,25 @@ console.log("📜 Commands loaded:", client.commands.keys());
 
 client.on('messageCreate', async message => {
     if (message.author.bot || message.guildId !== null) return;
-    if (message.author.id === 278956433532518400 && message.content === "do this shit"){
-        console.log("yes sir");
-        await sendDailyQuiz().then(console.log("done"));
-    }
+
 })
 
 client.once('ready', async () => {
     console.log(`🤖 Logged in as ${client.user.tag}!`);
     await client.application.commands.set(commands);
+    await client.user.setPresence({
+        status: 'online', // You can also use 'idle', 'dnd', or 'invisible'
+        activities: [{
+            name: 'lots of data', // This is the activity your bot is "playing"
+            type: 3 // Other types include 'WATCHING', 'LISTENING', etc.
+        }]
+    });
 
     const globalCommands = await client.application.commands.fetch();
     console.log("🌍 Global Commands:", globalCommands.map(cmd => cmd.name));
 
     //sendScoreboardJob.start();
+    await checkVersionAndNotify();
     sendDMJob.start();
 });
 
