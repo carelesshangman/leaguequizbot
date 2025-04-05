@@ -117,7 +117,7 @@ const triviaQuestionsSonic = [
         "references": ["League of Legends Official Website", "Riot Games Lore"],
         color: "#006400",
         spoiler: false,
-        image: "https://tenor.com/view/akali-ramen-league-of-legends-eating-gif-17379327"
+        image: "https://cdn.discordapp.com/attachments/677053170676924447/1358065955439247513/7bc7c9e13e7fb8afd46fde51280dea52.gif?ex=67f27cfb&is=67f12b7b&hm=2a5a6cd016c335d739c41c498faf42a76890be773a007a895d7182c9c5fed88e&"
     },
     {
         question: "What was the original passive effect of the Banner of Command item?",
