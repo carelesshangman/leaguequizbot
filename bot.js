@@ -306,6 +306,8 @@ const sendDailyQuiz = async () => {
     // Track this question as sent
     saveSentQuestion(questionIndex);
 
+    globalZoomChallenge = null;
+
     // Keep track of message history
     const messageHistory = readMessageHistory();
     const today = new Date().toISOString().slice(0, 10);
@@ -339,6 +341,214 @@ const sendDailyQuiz = async () => {
     // Save updated message history
     saveMessageHistory(messageHistory);
 };
+
+let globalZoomChallenge = null;
+
+const zoomLevels = [0.1, 0.25, 0.55, 0.8];
+const MAX_ATTEMPTS = zoomLevels.length; // 4 attempts before the final reveal
+
+// Start a new zoom challenge for a given user (triggered after trivia answer processing)
+async function generateGlobalZoomChallenge() {
+    // Pick a random quiz entry from zoomin_quiz.js
+    const quizEntry = zoomInQuiz[Math.floor(Math.random() * zoomInQuiz.length)];
+    const imagePath = path.join(__dirname, quizEntry.asset);
+
+    // Load the image and get its dimensions
+    const image = sharp(imagePath);
+    const metadata = await image.metadata();
+    const { width, height } = metadata;
+
+    // Calculate minimum crop dimensions based on the hardest zoom (attempt 1: 10% of the image)
+    const minCropWidth = width * zoomLevels[0];
+    const minCropHeight = height * zoomLevels[0];
+
+    // Choose a random center point ensuring the smallest crop will be completely inside the image
+    const minX = minCropWidth / 2;
+    const maxX = width - minCropWidth / 2;
+    const minY = minCropHeight / 2;
+    const maxY = height - minCropHeight / 2;
+    const cx = Math.floor(Math.random() * (maxX - minX) + minX);
+    const cy = Math.floor(Math.random() * (maxY - minY) + minY);
+
+    // Pre-generate cropped images for each zoom level for both modes (hard = grayscaled, easy = color)
+    const challengeImages = { hard: [], easy: [] };
+    for (let i = 0; i < zoomLevels.length; i++) {
+        const zoomRatio = zoomLevels[i];
+        const cropWidth = Math.floor(width * zoomRatio);
+        const cropHeight = Math.floor(height * zoomRatio);
+        // Calculate the top-left of the crop rectangle, ensuring it stays within bounds
+        const left = Math.max(0, Math.min(cx - Math.floor(cropWidth / 2), width - cropWidth));
+        const top = Math.max(0, Math.min(cy - Math.floor(cropHeight / 2), height - cropHeight));
+
+        // Process for easy mode: crop and resize to a fixed height of 600px
+        const easyBuffer = await sharp(imagePath)
+            .extract({ left, top, width: cropWidth, height: cropHeight })
+            .resize({ height: 600 })
+            .toBuffer();
+        // Process for hard mode: same but with grayscale effect
+        const hardBuffer = await sharp(imagePath)
+            .extract({ left, top, width: cropWidth, height: cropHeight })
+            .resize({ height: 600 })
+            .grayscale()
+            .toBuffer();
+
+        challengeImages.easy.push(easyBuffer);
+        challengeImages.hard.push(hardBuffer);
+    }
+
+    // Pre-generate the final full (uncropped) image (resized to height 600) to reveal at the end
+    const finalBuffer = await sharp(imagePath)
+        .resize({ height: 600 })
+        .toBuffer();
+
+    return { quizEntry, images: challengeImages, finalImage: finalBuffer };
+}
+
+// Start a new zoom challenge for a given user after trivia completion
+async function startZoomInChallenge(userId) {
+    // Generate global challenge only once so all users share the same zoom location/images
+    if (!globalZoomChallenge) {
+        globalZoomChallenge = await generateGlobalZoomChallenge();
+    }
+
+    // Save individual challenge state for this user with their own attempt count and mode
+    activeZoomInChallenges.set(userId, {
+        attempt: 1,
+        mode: "hard", // default mode is hard (with grayscale)
+        // Reference the global images
+        images: globalZoomChallenge.images,
+        finalImage: globalZoomChallenge.finalImage,
+        quizEntry: globalZoomChallenge.quizEntry,
+        messageId: null // to track the challenge message for deletion/updating
+    });
+
+    // Send the first challenge message to the user
+    await sendZoomChallengeMessage(userId);
+}
+
+// Function to send (or update) the zoom challenge message for a given user
+async function sendZoomChallengeMessage(userId) {
+    const challenge = activeZoomInChallenges.get(userId);
+    if (!challenge) return;
+
+    const { attempt, mode, images, quizEntry } = challenge;
+    const channel = await client.users.fetch(userId).then(user => user.createDM());
+
+    // On the first attempt in hard mode, include the button to switch to Easy Mode.
+    let components = [];
+    if (attempt === 1 && mode === "hard") {
+        const easyModeButton = new ButtonBuilder()
+            .setCustomId('zoom_switch_easy')
+            .setLabel('Switch to Easy Mode')
+            .setStyle(ButtonStyle.Primary);
+        components.push(new ActionRowBuilder().addComponents(easyModeButton));
+    }
+
+    // Choose the appropriate image: if attempt <= MAX_ATTEMPTS use the pre-generated cropped image; otherwise, use the final full image.
+    let attachment;
+    if (attempt <= MAX_ATTEMPTS) {
+        const buffer = mode === "hard" ? images.hard[attempt - 1] : images.easy[attempt - 1];
+        attachment = new AttachmentBuilder(buffer, { name: 'zoom.jpg' });
+    } else {
+        attachment = new AttachmentBuilder(challenge.finalImage, { name: 'final.jpg' });
+    }
+
+    // Build an embed describing the current attempt
+    let description;
+    if (attempt <= MAX_ATTEMPTS) {
+        description = `**Zoom-In Challenge**\nGuess the champion from this zoomed-in image!\nAttempt ${attempt} of ${MAX_ATTEMPTS}.\n` +
+            `You can switch to Easy Mode (disables grayscale) using the button on this first attempt.`;
+    } else {
+        description = `**Final Reveal**\nThe full image is shown below. The correct answer was **${quizEntry.answer.join(", ")}**.`;
+    }
+
+    const embed = new EmbedBuilder()
+        .setTitle('Zoom-In Challenge')
+        .setDescription(description)
+        .setColor('#1E90FF')
+        .setImage('attachment://' + (attempt <= MAX_ATTEMPTS ? 'zoom.jpg' : 'final.jpg'))
+        .setFooter({ text: 'Type your guess in the chat.' });
+
+    // If there's a previous challenge message, delete it
+    if (challenge.messageId) {
+        try {
+            const oldMessage = await channel.messages.fetch(challenge.messageId);
+            await oldMessage.delete();
+        } catch (error) {
+            console.error(`Error deleting previous zoom challenge message for user ${userId}:`, error);
+        }
+    }
+
+    // Send the new challenge message with the attachment and (if applicable) the easy mode button
+    const sentMessage = await channel.send({ embeds: [embed], components, files: [attachment] });
+    // Save the new message id for later deletion/updating
+    challenge.messageId = sentMessage.id;
+    activeZoomInChallenges.set(userId, challenge);
+}
+
+// Process a DM from a user who is currently in a zoom challenge
+async function processZoomGuess(message) {
+    const userId = message.author.id;
+    const challenge = activeZoomInChallenges.get(userId);
+    if (!challenge) return;
+
+    const guess = message.content.trim().toLowerCase();
+    // Accept if the guess exactly matches any of the answers (ignoring capitalization)
+    const correctAnswers = challenge.quizEntry.answer.map(ans => ans.toLowerCase());
+    const isCorrect = correctAnswers.some(ans => ans === guess);
+
+    if (isCorrect) {
+        // Award points: 2 for hard mode, 1 for easy mode
+        const points = challenge.mode === "hard" ? 2 : 1;
+        addExtraPoints(userId, points);
+
+        // Send a final embed revealing the full image and the correct answer
+        const channel = await message.author.createDM();
+        const finalEmbed = new EmbedBuilder()
+            .setTitle('Zoom-In Challenge Completed!')
+            .setDescription(`Correct! The answer was **${challenge.quizEntry.answer.join(", ")}**.\n` +
+                `You earned ${points} point${points > 1 ? 's' : ''} in this challenge.`)
+            .setColor('#1E90FF')
+            .setImage('attachment://final.jpg');
+        const finalAttachment = new AttachmentBuilder(challenge.finalImage, { name: 'final.jpg' });
+        await channel.send({ embeds: [finalEmbed], files: [finalAttachment] });
+        await scoreboardFromUserId(userId);
+
+        // Clear the challenge state for this user
+        activeZoomInChallenges.delete(userId);
+        return;
+    } else {
+        // Incorrect guess: increment the attempt count
+        challenge.attempt++;
+        if (challenge.attempt > MAX_ATTEMPTS) {
+            // Out of attempts: send the final reveal message
+            const channel = await message.author.createDM();
+            const finalEmbed = new EmbedBuilder()
+                .setTitle('Zoom-In Challenge Over')
+                .setDescription(`Out of attempts! The correct answer was **${challenge.quizEntry.answer.join(", ")}**.`)
+                .setColor('#FF0000')
+                .setImage('attachment://final.jpg');
+            const finalAttachment = new AttachmentBuilder(challenge.finalImage, { name: 'final.jpg' });
+            await channel.send({ embeds: [finalEmbed], files: [finalAttachment] });
+            activeZoomInChallenges.delete(userId);
+        } else {
+            // Otherwise, send the next (less zoomed-in) image
+            await sendZoomChallengeMessage(userId);
+        }
+    }
+}
+
+// Helper to add extra points to the user’s profile (in addition to the trivia point)
+function addExtraPoints(userId, points) {
+    const profileData = getUserProfileData(userId);
+    profileData.currentScore += points;
+    saveProfileData(profileData);
+    // OPTIONAL: To fix the hotstreak bug, you might want to add logic here to reset the streak
+    // if the user did not complete the daily quiz. For example:
+    // if (!hasCompletedDailyQuiz(userId)) {
+    //     profileData.currentStreak = 0;
+    // }
+}
 
 // Define the profile command
 const profile = async (interaction) => {
@@ -554,6 +764,101 @@ const dailyScoreboard = async (interaction) => {
     await interaction.user.send({embeds: [embed]});
 }
 
+const scoreboardFromUserId = async (userId) => {
+    // Fetch the user object from Discord
+    const user = await client.users.fetch(userId);
+    const displayName = user.username; // using username for DMs
+
+    // Get all profiles
+    const profiles = readProfilesCSV();
+
+    // Sort profiles by score (descending)
+    const sortedProfiles = [...profiles].sort((a, b) => b.currentScore - a.currentScore);
+
+    // Take top 10 (or fewer if there aren't that many)
+    const topPlayers = sortedProfiles.slice(0, 10);
+
+    // Create embed
+    const embed = new EmbedBuilder()
+        .setTitle('🏆 League of Legends Trivia Leaderboard 🏆')
+        .setColor('#FFD700')
+        .setDescription('The top trivia masters of League of Legends knowledge!')
+        .setTimestamp();
+
+    // Get actual usernames and add to embed
+    let leaderboardText = '';
+
+    if (topPlayers.length === 0) {
+        leaderboardText = 'No players yet. Be the first to register with `/register`!\n\n';
+    } else {
+        for (let i = 0; i < topPlayers.length; i++) {
+            try {
+                const userProfile = topPlayers[i];
+                let playerDisplayName;
+                // Fetch user to get display name
+                try {
+                    const fetchedUser = await client.users.fetch(userProfile.userId);
+                    playerDisplayName = userProfile.visibility ? fetchedUser.username : '||Hidden||';
+                } catch (error) {
+                    playerDisplayName = userProfile.visibility ? 'Unknown User' : '||Hidden||';
+                }
+
+                // Medals for top 3
+                let rank;
+                if (i === 0) rank = '🥇';
+                else if (i === 1) rank = '🥈';
+                else if (i === 2) rank = '🥉';
+                else rank = `${i + 1}.`;
+
+                // Highlight the user who requested the scoreboard
+                const isCurrentUser = userProfile.userId === userId;
+                if (isCurrentUser) {
+                    leaderboardText += `**${rank} ${playerDisplayName} - ${userProfile.currentScore} pts `;
+                    leaderboardText += `(streak: ${userProfile.currentStreak}) ← YOU**\n`;
+                } else {
+                    leaderboardText += `${rank} **${playerDisplayName}** - ${userProfile.currentScore} pts `;
+                    leaderboardText += `(streak: ${userProfile.currentStreak})\n`;
+                }
+            } catch (error) {
+                console.error(`Failed to process user ${topPlayers[i].userId}:`, error);
+            }
+        }
+    }
+
+    embed.setDescription(leaderboardText);
+
+    // Find the user's rank
+    const userRank = sortedProfiles.findIndex(profile => profile.userId === userId) + 1;
+    const userProfile = sortedProfiles[userRank - 1];
+
+    // Always show user info section for testing
+    embed.addFields({
+        name: '🏆 Your Information',
+        value:
+            `Rank: ${userRank > 0 ? `#${userRank} - ${userProfile.currentScore} pts` : 'Not ranked'}\n` +
+            `Visibility: ${userRank > 0 ? (userProfile.visibility ? 'Visible' : 'Hidden') : 'N/A'}`,
+        inline: false
+    });
+
+    // Add additional section showing user rank if they're not in top 10 but are registered
+    if (userRank > 0 && userRank > topPlayers.length) {
+        embed.addFields({
+            name: '📊 Your Ranking',
+            value: `You are ranked #${userRank} with ${userProfile.currentScore} points and a streak of ${userProfile.currentStreak}.`,
+            inline: false
+        });
+    }
+
+    // Add footer with total players count
+    embed.setFooter({
+        text: `Total players: ${profiles.length} | Update your visibility with /privacy`
+    });
+
+    // Send the embed as a DM to the user
+    return user.send({ embeds: [embed] });
+};
+
+
 // Updated scoreboard command that always displays user info for testing
 const scoreboard = async (interaction) => {
     const userId = interaction.user.id;
@@ -741,6 +1046,17 @@ const handleButtonInteraction = async (interaction) => {
         await registerUser(interaction);
     }
 
+    if (interaction.customId === 'zoom_switch_easy') {
+        const userId = interaction.user.id;
+        const challenge = activeZoomInChallenges.get(userId);
+        if (challenge && challenge.mode === "hard") {
+            challenge.mode = "easy"; // Switch mode
+            // Update the challenge message to reflect the new mode (and remove the button)
+            await sendZoomChallengeMessage(userId);
+            await interaction.update({ content: "Switched to Easy Mode.", components: [] });
+        }
+    }
+
     if (interaction.customId.startsWith("trivia_")) {
         const questionData = globalQuestionData;
         if (!questionData) {
@@ -798,7 +1114,9 @@ const handleButtonInteraction = async (interaction) => {
 
         //here
 
-        await interaction.update({ embeds: [embed], components: [] }).then(dailyScoreboard(interaction));
+        await interaction.update({ embeds: [embed], components: [] });
+
+        await startZoomInChallenge(interaction.user.id);
     }
 
 };
@@ -1176,9 +1494,11 @@ commands.forEach(cmd => client.commands.set(cmd.name, cmd));
 console.log("📜 Commands loaded:", client.commands.keys());
 
 client.on('messageCreate', async message => {
-    if (message.author.bot || message.guildId !== null) return;
-
-})
+    if (message.author.bot || message.guild) return; // Only process DMs
+    if (activeZoomInChallenges.has(message.author.id)) {
+        await processZoomGuess(message);
+    }
+});
 
 client.once('ready', async () => {
     console.log(`🤖 Logged in as ${client.user.tag}!`);
