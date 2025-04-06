@@ -1504,10 +1504,10 @@ client.once('ready', async () => {
     console.log(`🤖 Logged in as ${client.user.tag}!`);
     await client.application.commands.set(commands);
     await client.user.setPresence({
-        status: 'online', // You can also use 'idle', 'dnd', or 'invisible'
+        status: 'online',
         activities: [{
-            name: 'lots of data', // This is the activity your bot is "playing"
-            type: 3 // Other types include 'WATCHING', 'LISTENING', etc.
+            name: 'lots of data',
+            type: 3
         }]
     });
 
@@ -1518,6 +1518,10 @@ client.once('ready', async () => {
     await checkVersionAndNotify();
     sendDMJob.start();
 });
+
+client
+    .on("debug", console.log)
+    .on("warn", console.log)
 
 client.login(process.env.TOKEN);
 
